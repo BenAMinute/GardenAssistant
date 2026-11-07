@@ -1,0 +1,227 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body {
+    overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+}
+
+/* Dynamic viewport height helper for mobile browsers (iOS Safari / Chrome Android) */
+.app-workspace-height {
+  height: calc(100vh - 6.5rem);
+  height: calc(100dvh - 6.5rem);
+}
+
+@media (min-width: 768px) {
+  .app-workspace-height {
+    height: calc(100vh - 4rem);
+    height: calc(100dvh - 4rem);
+  }
+}
+
+/* Hide scrollbars on horizontal pill filter bars for clean mobile touch scrolling */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Subtle dot/grid background for the overall yard view */
+.yard-grid-bg {
+  background-color: #f5f5f0;
+  background-image: 
+    linear-gradient(to right, rgba(120, 113, 108, 0.14) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(120, 113, 108, 0.14) 1px, transparent 1px);
+}
+
+/* Custom soil texture pattern for garden bed tiles */
+.soil-pattern {
+  background-color: #5c4033;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.06) 1px, transparent 0);
+  background-size: 12px 12px;
+}
+
+/* Lush lawn grass panel texture */
+.grass-pattern {
+  background-color: #86efac;
+  background-image:
+    radial-gradient(#22c55e 1.25px, transparent 1.25px),
+    radial-gradient(#16a34a 1.25px, #bbf7d0 1.25px);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+}
+
+/* Clover / Pollinator turf texture */
+.surface-grass-clover {
+  background-color: #4ade80;
+  background-image:
+    radial-gradient(#ffffff 1.6px, transparent 1.6px),
+    radial-gradient(#15803d 1.4px, #86efac 1.4px);
+  background-size: 18px 18px;
+  background-position: 0 0, 9px 9px;
+}
+
+/* Grey Pea Gravel pathway texture */
+.gravel-pattern,
+.surface-gravel-grey {
+  background-color: #d6d3d1;
+  background-image:
+    radial-gradient(#78716c 1.4px, transparent 1.4px),
+    radial-gradient(#a8a29e 1.5px, #e7e5e4 1.5px);
+  background-size: 12px 12px;
+  background-position: 0 0, 6px 6px;
+}
+
+/* River Rock / Tan Pea Gravel texture */
+.surface-gravel-tan {
+  background-color: #e7d3b5;
+  background-image:
+    radial-gradient(#92623a 1.5px, transparent 1.5px),
+    radial-gradient(#b48a60 1.5px, #f3e5d0 1.5px);
+  background-size: 12px 12px;
+  background-position: 0 0, 6px 6px;
+}
+
+/* White Crushed Stone / Marble Chips texture */
+.surface-gravel-white {
+  background-color: #f5f5f4;
+  background-image:
+    radial-gradient(#a8a29e 1.2px, transparent 1.2px),
+    radial-gradient(#d6d3d1 1.3px, #fafaf9 1.3px);
+  background-size: 12px 12px;
+  background-position: 0 0, 6px 6px;
+}
+
+/* Dark Hardwood Bark Mulch texture */
+.surface-mulch-dark {
+  background-color: #4a3222;
+  background-image: repeating-linear-gradient(
+    -35deg,
+    rgba(255, 255, 255, 0.05),
+    rgba(255, 255, 255, 0.05) 3px,
+    rgba(0, 0, 0, 0.14) 3px,
+    rgba(0, 0, 0, 0.14) 6px
+  );
+}
+
+/* Cedar Woodchip Mulch texture */
+.surface-mulch-cedar {
+  background-color: #9a5b32;
+  background-image: repeating-linear-gradient(
+    35deg,
+    rgba(255, 237, 213, 0.14),
+    rgba(255, 237, 213, 0.14) 4px,
+    rgba(67, 20, 7, 0.16) 4px,
+    rgba(67, 20, 7, 0.16) 8px
+  );
+}
+
+/* Red Bark Mulch texture */
+.surface-mulch-red {
+  background-color: #8f2d22;
+  background-image: repeating-linear-gradient(
+    -30deg,
+    rgba(254, 202, 202, 0.1),
+    rgba(254, 202, 202, 0.1) 3px,
+    rgba(69, 10, 10, 0.2) 3px,
+    rgba(69, 10, 10, 0.2) 7px
+  );
+}
+
+/* Brick Paver walkway texture */
+.surface-paver-brick {
+  background-color: #b4533c;
+  background-image:
+    linear-gradient(to right, rgba(255, 237, 213, 0.35) 2px, transparent 2px),
+    linear-gradient(to bottom, rgba(255, 237, 213, 0.35) 2px, transparent 2px);
+  background-size: 20px 12px;
+}
+
+/* Slate Flagstone walkway texture */
+.surface-paver-slate {
+  background-color: #64748b;
+  background-image:
+    linear-gradient(to right, rgba(226, 232, 240, 0.35) 2px, transparent 2px),
+    linear-gradient(to bottom, rgba(226, 232, 240, 0.35) 2px, transparent 2px);
+  background-size: 22px 22px;
+}
+
+/* Cedar Wood Boardwalk / Decking texture */
+.surface-wood-cedar {
+  background-color: #b47b48;
+  background-image: repeating-linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.08),
+    rgba(255, 255, 255, 0.08) 8px,
+    rgba(67, 20, 7, 0.22) 8px,
+    rgba(67, 20, 7, 0.22) 10px
+  );
+}
+
+/* Tree Shade Canopy texture */
+.surface-tree-canopy {
+  background-color: rgba(22, 163, 74, 0.25);
+  background-image: radial-gradient(rgba(21, 128, 61, 0.35) 2px, transparent 2px);
+  background-size: 14px 14px;
+}
+
+/* Custom color speckled texture overlay */
+.surface-custom-overlay {
+  background-image:
+    radial-gradient(rgba(0, 0, 0, 0.12) 1.4px, transparent 1.4px),
+    radial-gradient(rgba(255, 255, 255, 0.16) 1.4px, transparent 1.4px);
+  background-size: 12px 12px;
+  background-position: 0 0, 6px 6px;
+}
+
+/* Architectural shingle / structure roof texture */
+.building-pattern {
+  background-color: #475569;
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(255, 255, 255, 0.06),
+    rgba(255, 255, 255, 0.06) 6px,
+    transparent 6px,
+    transparent 12px
+  );
+}
+
+/* Translucent polycarbonate / glass greenhouse pattern */
+.greenhouse-pattern {
+  background-color: rgba(186, 230, 253, 0.65);
+  background-image:
+    linear-gradient(to right, rgba(14, 116, 144, 0.25) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(14, 116, 144, 0.25) 1px, transparent 1px);
+  background-size: 16px 16px;
+}
+
+/* Stone patio / deck pattern */
+.patio-pattern {
+  background-color: #fed7aa;
+  background-image:
+    linear-gradient(to right, rgba(154, 52, 18, 0.15) 2px, transparent 2px),
+    linear-gradient(to bottom, rgba(154, 52, 18, 0.15) 2px, transparent 2px);
+  background-size: 20px 20px;
+}
+
+/* Scrollbar polish */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(120, 113, 108, 0.3);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(120, 113, 108, 0.5);
+}
