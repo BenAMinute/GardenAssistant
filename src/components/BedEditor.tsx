@@ -16,15 +16,16 @@ import {
   CircleDot,
   Columns,
   Droplets,
+  Grid3x3,
   Paintbrush,
   ZoomIn,
   ZoomOut,
   X,
 } from 'lucide-react';
 import {
+  BedConfig,
   BedIrrigationType,
   GardenBed,
-  GardenBedType,
   PlantFamilyId,
   PlantInfo,
   WaterNeedLevel,
@@ -37,14 +38,22 @@ import {
   WATER_NEED_META,
 } from '../data/plants';
 import {
+  buildPlantingIndex,
   checkPairCompatibility,
   doesCellHaveCage,
   doesCellHaveDrip,
   evaluateBedCells,
+  findTouchingPlantings,
+  getArchRange,
   getPipeCellConnections,
   getRelationshipReason,
+  getSquareDivision,
+  getSquareRepresentativePlant,
   hasWaterNeedMismatch,
   isCellUnderArch,
+  makeSlotKey,
+  parsePlantingKey,
+  SQUARE_DIVISION_OPTIONS,
 } from '../utils/companionChecker';
 import { NewBedModal } from './NewBedModal';
 import {
@@ -68,24 +77,31 @@ interface BedEditorProps {
     irrigationType: BedIrrigationType
   ) => void;
   onClearBed: (bedId: string) => void;
-  onResizeOrRenameBed: (
-    bedId: string,
-    name: string,
-    width: number,
-    height: number,
-    bedType: GardenBedType,
-    walkwayWidth: number
-  ) => void;
+  onResizeOrRenameBed: (bedId: string, config: BedConfig) => void;
+  onSetSquareDivision: (bedId: string, coord: string | 'all', n: number) => void;
 }
 
-type ToolMode = 'plant' | 'drip' | 'cage' | 'arch' | 'inspect' | 'erase';
+type ToolMode = 'plant' | 'drip' | 'cage' | 'arch' | 'split' | 'inspect' | 'erase';
 type CellScale = 'compact' | 'normal' | 'large';
+type PlacementHint = 'conflict' | 'water_mismatch' | 'synergy' | 'neutral';
+
+/** Tools that act on a whole 1 sq ft square even when the square is subdivided */
+const SQUARE_LEVEL_TOOLS: ToolMode[] = ['drip', 'cage', 'arch', 'split'];
 
 const CELL_SCALE_MINMAX: Record<CellScale, string> = {
   compact: 'minmax(52px, 64px)',
   normal: 'minmax(66px, 82px)',
   large: 'minmax(84px, 104px)',
 };
+
+/** Approximate rendered square size (px) per zoom level, used to scale sub-slot emojis */
+const CELL_SCALE_PX: Record<CellScale, number> = {
+  compact: 60,
+  normal: 78,
+  large: 100,
+};
+
+const fmtFt = (n: number) => (Number.isInteger(n) ? `${n}` : n.toFixed(1));
 
 export const BedEditor: React.FC<BedEditorProps> = ({
   beds,
@@ -100,6 +116,7 @@ export const BedEditor: React.FC<BedEditorProps> = ({
   onChangeBedIrrigation,
   onClearBed,
   onResizeOrRenameBed,
+  onSetSquareDivision,
 }) => {
   const [selectedPlantId, setSelectedPlantId] = useState<string>('tomato');
   const [toolMode, setToolMode] = useState<ToolMode>('plant');
@@ -114,6 +131,7 @@ export const BedEditor: React.FC<BedEditorProps> = ({
   const [showHydroZoneColors, setShowHydroZoneColors] =
     useState<boolean>(false);
   const [isEditBedModalOpen, setIsEditBedModalOpen] = useState(false);
+  const [splitSize, setSplitSize] = useState<number>(3);
 
   // Mobile sheets & collapsible banners
   const [showMobilePlantSheet, setShowMobilePlantSheet] = useState(false);
@@ -132,9 +150,10 @@ export const BedEditor: React.FC<BedEditorProps> = ({
 
   const selectedPlant: PlantInfo | undefined = PLANT_MAP[selectedPlantId];
   const isArchBox = activeBed.bedType === 'arch_box';
-  const isTomatoArchBed = activeBed.bedType === 'tomato_arch';
   const splitCol = Math.max(1, Math.floor(activeBed.width / 2));
   const walkwayFt = activeBed.walkwayWidth || 2;
+  const archRange = getArchRange(activeBed);
+  const isPartialArch = archRange.length < activeBed.height - 1e-6;
 
   const evaluations = useMemo(() => evaluateBedCells(activeBed), [activeBed]);
 
@@ -196,71 +215,62 @@ export const BedEditor: React.FC<BedEditorProps> = ({
     return list;
   }, [evaluations]);
 
-  // Compute live preview compatibility for each square if the user places `selectedPlant` there
+  // Compute live preview compatibility for each square / sub-slot if the user places `selectedPlant` there
   const previewHints = useMemo(() => {
-    const hints: Record<
-      string,
-      'conflict' | 'water_mismatch' | 'synergy' | 'neutral'
-    > = {};
+    const hints: Record<string, PlacementHint> = {};
     if (toolMode !== 'plant' || !selectedPlant) return hints;
 
-    const deltas = [
-      [-1, -1],
-      [0, -1],
-      [1, -1],
-      [-1, 0],
-      [1, 0],
-      [-1, 1],
-      [0, 1],
-      [1, 1],
-    ];
+    const index = buildPlantingIndex(activeBed);
+
+    const hintFor = (target: {
+      key: string;
+      col: number;
+      row: number;
+      x: number;
+      y: number;
+      size: number;
+    }): PlacementHint => {
+      let hasAntagonist = false;
+      let hasWaterMismatch = false;
+      let hasCompanion = false;
+      for (const q of findTouchingPlantings(activeBed, index, target)) {
+        const rel = checkPairCompatibility(selectedPlant.id, q.plant.id);
+        if (rel === 'antagonist') hasAntagonist = true;
+        if (rel === 'companion') hasCompanion = true;
+        if (hasWaterNeedMismatch(selectedPlant, q.plant)) hasWaterMismatch = true;
+      }
+      if (hasAntagonist) return 'conflict';
+      if (hasWaterMismatch) return 'water_mismatch';
+      if (hasCompanion) return 'synergy';
+      return 'neutral';
+    };
 
     for (let r = 0; r < activeBed.height; r++) {
       for (let c = 0; c < activeBed.width; c++) {
         const coord = `${c},${r}`;
-        let hasAntagonistNeighbor = false;
-        let hasWaterMismatchNeighbor = false;
-        let hasCompanionNeighbor = false;
-
-        for (const [dx, dy] of deltas) {
-          const nCol = c + dx;
-          const nRow = r + dy;
-          if (
-            nCol < 0 ||
-            nCol >= activeBed.width ||
-            nRow < 0 ||
-            nRow >= activeBed.height
-          )
-            continue;
-          if (isArchBox && c < splitCol !== nCol < splitCol) continue;
-
-          const nCoord = `${nCol},${nRow}`;
-          const nPlantId = activeBed.cells[nCoord];
-          if (!nPlantId) continue;
-          const nPlant = PLANT_MAP[nPlantId];
-          if (!nPlant) continue;
-
-          const rel = checkPairCompatibility(selectedPlant.id, nPlantId);
-          if (rel === 'antagonist') hasAntagonistNeighbor = true;
-          if (rel === 'companion') hasCompanionNeighbor = true;
-          if (hasWaterNeedMismatch(selectedPlant, nPlant)) {
-            hasWaterMismatchNeighbor = true;
-          }
-        }
-
-        if (hasAntagonistNeighbor) {
-          hints[coord] = 'conflict';
-        } else if (hasWaterMismatchNeighbor) {
-          hints[coord] = 'water_mismatch';
-        } else if (hasCompanionNeighbor) {
-          hints[coord] = 'synergy';
+        const div = getSquareDivision(activeBed, coord);
+        if (div <= 1) {
+          hints[coord] = hintFor({ key: coord, col: c, row: r, x: c, y: r, size: 1 });
         } else {
-          hints[coord] = 'neutral';
+          for (let sy = 0; sy < div; sy++) {
+            for (let sx = 0; sx < div; sx++) {
+              const key = makeSlotKey(c, r, sx, sy);
+              hints[key] = hintFor({
+                key,
+                col: c,
+                row: r,
+                x: c + sx / div,
+                y: r + sy / div,
+                size: 1 / div,
+              });
+            }
+          }
         }
       }
     }
     return hints;
-  }, [activeBed, selectedPlant, toolMode, isArchBox, splitCol]);
+  }, [activeBed, selectedPlant, toolMode]);
+
 
   const filteredPlants = useMemo(() => {
     return PLANTS.filter((p) => {
@@ -285,18 +295,27 @@ export const BedEditor: React.FC<BedEditorProps> = ({
       return;
     }
 
+    // Square-level tools always act on the parent 1 sq ft square, even when it is subdivided
+    const squareCoord = parsePlantingKey(coord).squareCoord;
+
     if (toolMode === 'drip') {
-      onToggleDripCell(activeBed.id, coord);
+      onToggleDripCell(activeBed.id, squareCoord);
       return;
     }
 
     if (toolMode === 'cage') {
-      onToggleCage(activeBed.id, coord);
+      onToggleCage(activeBed.id, squareCoord);
       return;
     }
 
     if (toolMode === 'arch') {
-      onToggleArchCell(activeBed.id, coord);
+      onToggleArchCell(activeBed.id, squareCoord);
+      return;
+    }
+
+    if (toolMode === 'split') {
+      onSetSquareDivision(activeBed.id, squareCoord, splitSize);
+      setInspectedCoord(null);
       return;
     }
 
@@ -305,7 +324,10 @@ export const BedEditor: React.FC<BedEditorProps> = ({
       return;
     }
 
-    const existingPlantId = activeBed.cells[coord];
+    const parsedCoord = parsePlantingKey(coord);
+    const existingPlantId = parsedCoord.isSlot
+      ? activeBed.subCells?.[coord]
+      : activeBed.cells[coord];
     if (existingPlantId === selectedPlantId) {
       // Tapping an already-planted square with the same plant opens its inspector
       setInspectedCoord((prev) => (prev === coord ? null : coord));
@@ -314,6 +336,10 @@ export const BedEditor: React.FC<BedEditorProps> = ({
     }
   };
 
+  // The stroke-dedupe key: square-level tools should only fire once per square while dragging
+  const strokeKeyFor = (coord: string) =>
+    SQUARE_LEVEL_TOOLS.includes(toolMode) ? parsePlantingKey(coord).squareCoord : coord;
+
   // Continuous drag-to-paint / drag-to-route handler for mouse & touch Swipe-Paint mode
   const handleGridPointerDown = (e: React.PointerEvent, coord: string) => {
     const isTouch = e.pointerType === 'touch';
@@ -321,7 +347,7 @@ export const BedEditor: React.FC<BedEditorProps> = ({
 
     e.preventDefault();
     isStrokeActiveRef.current = true;
-    visitedStrokeCoordsRef.current = new Set([coord]);
+    visitedStrokeCoordsRef.current = new Set([strokeKeyFor(coord)]);
     handleCellClick(coord);
   };
 
@@ -331,9 +357,11 @@ export const BedEditor: React.FC<BedEditorProps> = ({
     const cellBtn = el?.closest('[data-bed-coord]') as HTMLElement | null;
     if (!cellBtn) return;
     const coord = cellBtn.getAttribute('data-bed-coord');
-    if (!coord || visitedStrokeCoordsRef.current.has(coord)) return;
+    if (!coord) return;
+    const strokeKey = strokeKeyFor(coord);
+    if (visitedStrokeCoordsRef.current.has(strokeKey)) return;
 
-    visitedStrokeCoordsRef.current.add(coord);
+    visitedStrokeCoordsRef.current.add(strokeKey);
     handleCellClick(coord);
   };
 
@@ -352,31 +380,176 @@ export const BedEditor: React.FC<BedEditorProps> = ({
   };
 
   const inspectedEval = inspectedCoord ? evaluations[inspectedCoord] : null;
+  const inspectedSquare = inspectedCoord
+    ? parsePlantingKey(inspectedCoord).squareCoord
+    : null;
   const inspectedCaged =
-    inspectedCoord && inspectedEval
-      ? doesCellHaveCage(activeBed, inspectedCoord, inspectedEval.plant)
+    inspectedSquare && inspectedEval
+      ? doesCellHaveCage(
+          activeBed,
+          inspectedSquare,
+          getSquareRepresentativePlant(activeBed, inspectedSquare)
+        )
       : false;
-  const inspectedDrip = inspectedCoord
-    ? doesCellHaveDrip(activeBed, inspectedCoord)
+  const inspectedDrip = inspectedSquare
+    ? doesCellHaveDrip(activeBed, inspectedSquare)
     : false;
   const inspectedArch = useMemo(() => {
-    if (!inspectedCoord) return false;
-    const [c, r] = inspectedCoord.split(',').map(Number);
+    if (!inspectedSquare) return false;
+    const [c, r] = inspectedSquare.split(',').map(Number);
     return isCellUnderArch(activeBed, c, r);
-  }, [activeBed, inspectedCoord]);
+  }, [activeBed, inspectedSquare]);
+  const inspectedDivision = inspectedSquare
+    ? getSquareDivision(activeBed, inspectedSquare)
+    : 1;
+
+  // Compact grid-size picker shown in the inspector cards (desktop + mobile)
+  const renderInspectorSplit = (dark: boolean) =>
+    inspectedSquare ? (
+      <div
+        className={`flex items-center gap-0.5 rounded-lg p-0.5 shrink-0 ${
+          dark ? 'bg-stone-800' : 'bg-stone-100 border border-stone-200'
+        }`}
+        title="Planting grid inside this square"
+      >
+        <Grid3x3
+          className={`w-3.5 h-3.5 mx-1 ${dark ? 'text-violet-300' : 'text-violet-700'}`}
+        />
+        {SQUARE_DIVISION_OPTIONS.map((n) => (
+          <button
+            key={n}
+            type="button"
+            onClick={() => onSetSquareDivision(activeBed.id, inspectedSquare, n)}
+            className={`px-1.5 py-1 rounded-md text-[11px] font-bold font-mono ${
+              inspectedDivision === n
+                ? 'bg-violet-600 text-white'
+                : dark
+                ? 'text-stone-300'
+                : 'text-stone-600'
+            }`}
+          >
+            {n}×{n}
+          </button>
+        ))}
+      </div>
+    ) : null;
 
   const formatCoordLabel = (coord: string) => {
-    const [c, r] = coord.split(',').map(Number);
+    const { col: c, row: r, isSlot, sx, sy } = parsePlantingKey(coord);
+    const slotSuffix =
+      isSlot && sx !== undefined && sy !== undefined
+        ? ` · slot ${sy + 1},${sx + 1}`
+        : '';
     if (isArchBox) {
       const boxSide = c < splitCol ? 'Left Box' : 'Right Box';
       const localCol = c < splitCol ? c + 1 : c - splitCol + 1;
-      return `${boxSide} Col ${localCol}, Row ${r + 1}`;
+      return `${boxSide} Col ${localCol}, Row ${r + 1}${slotSuffix}`;
     }
-    return `Col ${c + 1}, Row ${r + 1}`;
+    return `Col ${c + 1}, Row ${r + 1}${slotSuffix}`;
+  };
+
+  // Render one 1 sq ft square that has been split into an N×N grid of plantable slots
+  const renderSplitSquare = (cIdx: number, rIdx: number, n: number) => {
+    const squareCoord = `${cIdx},${rIdx}`;
+    const hasArch = isCellUnderArch(activeBed, cIdx, rIdx);
+    const hasDrip = doesCellHaveDrip(activeBed, squareCoord);
+    const squarePlant = getSquareRepresentativePlant(activeBed, squareCoord);
+    const hasCage = doesCellHaveCage(activeBed, squareCoord, squarePlant);
+    const emojiPx = Math.max(9, Math.floor((CELL_SCALE_PX[cellScale] / n) * 0.62));
+
+    const slots: React.ReactNode[] = [];
+    for (let sy = 0; sy < n; sy++) {
+      for (let sx = 0; sx < n; sx++) {
+        const key = makeSlotKey(cIdx, rIdx, sx, sy);
+        const plantId = activeBed.subCells?.[key];
+        const plant = plantId ? PLANT_MAP[plantId] : null;
+        const ev = evaluations[key];
+        const hasConflict = Boolean(ev && ev.conflicts.length > 0);
+        const hasWaterWarning = Boolean(ev && ev.waterMismatches.length > 0);
+        const hasSynergy = Boolean(ev && ev.synergies.length > 0);
+        const hint = previewHints[key];
+        const isInspected = inspectedCoord === key;
+
+        let tone = 'bg-amber-950/35 border-amber-900/50 hover:border-amber-500';
+        if (hasConflict) tone = 'bg-red-600/85 border-red-200 ring-1 ring-red-400/80';
+        else if (showHydroZoneColors && plant) {
+          tone =
+            plant.waterNeed === 'high'
+              ? 'bg-blue-700/85 border-blue-300'
+              : plant.waterNeed === 'medium'
+              ? 'bg-sky-700/80 border-sky-300'
+              : 'bg-amber-600/85 border-amber-200';
+        } else if (hasWaterWarning) tone = 'bg-amber-700/85 border-amber-300';
+        else if (hasSynergy) tone = 'bg-emerald-700/85 border-emerald-300';
+        else if (plant) tone = 'bg-amber-950/70 border-amber-700/60 hover:border-amber-400';
+        else if (hint === 'conflict') tone = 'bg-amber-950/35 border-dashed border-red-400/80';
+        else if (hint === 'water_mismatch')
+          tone = 'bg-amber-950/35 border-dashed border-amber-400/80';
+        else if (hint === 'synergy')
+          tone = 'bg-amber-950/35 border-dashed border-emerald-400/80';
+
+        slots.push(
+          <button
+            key={key}
+            type="button"
+            data-bed-coord={key}
+            title={plant ? plant.name : 'Empty slot'}
+            onPointerDown={(e) => handleGridPointerDown(e, key)}
+            onClick={() => {
+              if (!isStrokeActiveRef.current) handleCellClick(key);
+            }}
+            style={{ touchAction: touchSwipePaint ? 'none' : 'manipulation' }}
+            className={`relative flex items-center justify-center rounded-md border select-none overflow-hidden transition active:scale-90 ${tone} ${
+              isInspected ? 'ring-2 ring-white z-20' : ''
+            }`}
+          >
+            {plant && (
+              <span style={{ fontSize: `${emojiPx}px` }} className="leading-none z-10">
+                {plant.emoji}
+              </span>
+            )}
+          </button>
+        );
+      }
+    }
+
+    return (
+      <div
+        key={squareCoord}
+        className="relative aspect-square rounded-xl p-0.5 soil-pattern border-2 border-amber-600/80 overflow-hidden"
+      >
+        {hasDrip && (
+          <DripCellOverlay
+            mode={
+              activeBed.irrigationType && activeBed.irrigationType !== 'none'
+                ? activeBed.irrigationType
+                : 'drip_lines'
+            }
+            compact
+          />
+        )}
+        {hasArch && <ArchCellOverlay compact />}
+        {hasCage && <CageOverlay compact />}
+        <div
+          className="relative z-10 w-full h-full grid gap-px"
+          style={{
+            gridTemplateColumns: `repeat(${n}, minmax(0, 1fr))`,
+            gridTemplateRows: `repeat(${n}, minmax(0, 1fr))`,
+          }}
+        >
+          {slots}
+        </div>
+        <span className="absolute bottom-0 right-0 z-20 pointer-events-none bg-black/60 text-amber-100 text-[8px] font-mono font-bold px-1 rounded-tl-md leading-tight">
+          {n}×{n}
+        </span>
+      </div>
+    );
   };
 
   // Render a single 1 sq ft cell button
   const renderCellButton = (cIdx: number, rIdx: number) => {
+    const division = getSquareDivision(activeBed, `${cIdx},${rIdx}`);
+    if (division > 1) return renderSplitSquare(cIdx, rIdx, division);
     const coord = `${cIdx},${rIdx}`;
     const plantId = activeBed.cells[coord];
     const plant = plantId ? PLANT_MAP[plantId] : null;
@@ -792,6 +965,49 @@ export const BedEditor: React.FC<BedEditorProps> = ({
               <span>Arch</span>
             </button>
             <button
+              id="tool-split"
+              onClick={() => setToolMode('split')}
+              title="Split squares into a finer planting grid (e.g. 3×3 = 9 plants per sq ft)"
+              className={`px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1 transition ${
+                toolMode === 'split'
+                  ? 'bg-violet-700 text-white shadow-2xs'
+                  : 'bg-white text-stone-600 border border-stone-200'
+              }`}
+            >
+              <Grid3x3 className="w-3.5 h-3.5" />
+              <span>Split</span>
+            </button>
+            {toolMode === 'split' && (
+              <div className="flex items-center gap-1 pl-1 ml-0.5 border-l border-stone-300">
+                {SQUARE_DIVISION_OPTIONS.map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    id={`split-size-${n}`}
+                    onClick={() => setSplitSize(n)}
+                    className={`px-1.5 py-1 rounded-md text-[11px] font-bold font-mono transition ${
+                      splitSize === n
+                        ? 'bg-violet-600 text-white'
+                        : 'bg-white text-stone-600 border border-stone-200'
+                    }`}
+                  >
+                    {n}×{n}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  id="split-apply-all"
+                  onClick={() => {
+                    onSetSquareDivision(activeBed.id, 'all', splitSize);
+                    setInspectedCoord(null);
+                  }}
+                  className="px-2 py-1 rounded-md text-[11px] font-semibold bg-violet-100 text-violet-900 border border-violet-300 hover:bg-violet-200 whitespace-nowrap"
+                >
+                  Apply to whole bed
+                </button>
+              </div>
+            )}
+            <button
               onClick={() => setToolMode('inspect')}
               className={`px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1 transition ${
                 toolMode === 'inspect'
@@ -973,30 +1189,52 @@ export const BedEditor: React.FC<BedEditorProps> = ({
                 </div>
               </div>
 
-              {/* CENTER WALKWAY + OVERHEAD TOMATO ARCH BRIDGE */}
-              <div className="w-12 sm:w-24 flex flex-col justify-between py-3 px-0.5 relative select-none shrink-0">
-                <div className="text-center bg-cyan-900 text-cyan-50 text-[9px] sm:text-[10px] font-bold py-1 px-1 rounded-lg shadow border border-cyan-500/50 z-10">
-                  🍅 {walkwayFt}′ Arch
+              {/* CENTER WALKWAY + OVERHEAD ARCH (only over its measured span) */}
+              <div className="w-12 sm:w-24 flex flex-col p-2 sm:p-4 border-4 border-transparent select-none shrink-0">
+                {/* Header slot mirrors the box header height so rows line up */}
+                <div
+                  title={`${walkwayFt}′ walkway`}
+                  className="text-center text-[9px] sm:text-[11px] font-bold mb-1.5 py-1 px-1 rounded-lg bg-cyan-900 text-cyan-50 border border-cyan-500/50 whitespace-nowrap overflow-hidden text-ellipsis"
+                >
+                  🍅 {isPartialArch
+                    ? `${fmtFt(archRange.length)}′@${fmtFt(archRange.start)}′`
+                    : `${fmtFt(archRange.length)}′`}
                 </div>
 
-                <div className="flex-1 flex flex-col justify-around my-2 relative">
-                  <div className="absolute inset-0 bg-gradient-to-r from-slate-700/25 via-cyan-400/20 to-slate-700/25 border-y-2 border-dashed border-slate-400 rounded-lg" />
-                  {Array.from({ length: activeBed.height }).map((_, rIdx) => (
-                    <div
-                      key={rIdx}
-                      className="w-full h-4 border-t-2 border-b-2 border-slate-400/80 bg-white/30 flex items-center justify-center relative"
-                    >
-                      <span className="text-[8px] font-mono font-bold text-slate-700 bg-white/80 px-1 rounded">
-                        Arch
-                      </span>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="text-center text-[9px] font-semibold text-stone-500">
-                  Walk
+                <div className="mb-1 text-[10px] font-mono invisible">x</div>
+                <div className="flex-1 flex flex-col gap-1 sm:gap-2 relative min-h-0">
+                  {Array.from({ length: activeBed.height }).map((_, rIdx) => {
+                    const overlap = Math.max(
+                      0,
+                      Math.min(rIdx + 1, archRange.end) - Math.max(rIdx, archRange.start)
+                    );
+                    const topOffset = Math.max(0, archRange.start - rIdx);
+                    return (
+                      <div
+                        key={rIdx}
+                        className="flex-1 relative min-h-0 border-x-2 border-dashed border-slate-400/50 bg-stone-300/20"
+                      >
+                        {overlap > 0 && (
+                          <div
+                            className="absolute inset-x-0 bg-gradient-to-r from-slate-600/60 via-cyan-200/80 to-slate-600/60 border-y-2 border-slate-300 flex items-center justify-center"
+                            style={{
+                              top: `${topOffset * 100}%`,
+                              height: `${overlap * 100}%`,
+                            }}
+                          >
+                            {overlap >= 1 && (
+                              <span className="text-[8px] font-mono font-bold text-slate-900 bg-white/70 px-1 rounded">
+                                Arch
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
+
 
               {/* RIGHT GARDEN BOX */}
               <div className="bg-amber-900 p-2 sm:p-4 rounded-2xl shadow-xl border-4 border-amber-800">
@@ -1043,14 +1281,8 @@ export const BedEditor: React.FC<BedEditorProps> = ({
               </div>
             </div>
           ) : (
-            /* ================= STANDARD OR SINGLE TOMATO ARCH BED ================= */
+            /* ================= STANDARD BED ================= */
             <div className="bg-amber-900 p-2.5 sm:p-4 rounded-2xl shadow-xl border-4 border-amber-800 max-w-full overflow-auto relative">
-              {isTomatoArchBed && (
-                <div className="mb-2 bg-cyan-900/90 text-cyan-100 border border-cyan-400/50 rounded-xl py-1 px-3 text-center text-xs font-bold flex items-center justify-center gap-1.5">
-                  <Columns className="w-3.5 h-3.5 text-cyan-300" />
-                  <span>Overhead Tomato Arch Trellis</span>
-                </div>
-              )}
 
               <div
                 className="grid gap-1.5 sm:gap-2 mb-1.5 pl-6"
@@ -1123,7 +1355,7 @@ export const BedEditor: React.FC<BedEditorProps> = ({
 
                 <div className="flex items-center gap-1.5">
                   <button
-                    onClick={() => onToggleDripCell(activeBed.id, inspectedCoord)}
+                    onClick={() => onToggleDripCell(activeBed.id, parsePlantingKey(inspectedCoord).squareCoord)}
                     className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 border ${
                       inspectedDrip
                         ? 'bg-sky-600 text-white border-sky-600'
@@ -1134,7 +1366,7 @@ export const BedEditor: React.FC<BedEditorProps> = ({
                     <span>{inspectedDrip ? 'Drip On' : 'Add Drip'}</span>
                   </button>
                   <button
-                    onClick={() => onToggleCage(activeBed.id, inspectedCoord)}
+                    onClick={() => onToggleCage(activeBed.id, parsePlantingKey(inspectedCoord).squareCoord)}
                     className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 border ${
                       inspectedCaged
                         ? 'bg-slate-800 text-white border-slate-800'
@@ -1145,7 +1377,7 @@ export const BedEditor: React.FC<BedEditorProps> = ({
                     <span>{inspectedCaged ? 'Cage On' : 'Add Cage'}</span>
                   </button>
                   <button
-                    onClick={() => onToggleArchCell(activeBed.id, inspectedCoord)}
+                    onClick={() => onToggleArchCell(activeBed.id, parsePlantingKey(inspectedCoord).squareCoord)}
                     className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 border ${
                       inspectedArch
                         ? 'bg-cyan-800 text-white border-cyan-800'
@@ -1155,6 +1387,7 @@ export const BedEditor: React.FC<BedEditorProps> = ({
                     <Columns className="w-3.5 h-3.5" />
                     <span>{inspectedArch ? 'Arch On' : 'Add Arch'}</span>
                   </button>
+                  {renderInspectorSplit(false)}
                   <button
                     onClick={() => {
                       onPlacePlant(activeBed.id, inspectedEval.coord, null);
@@ -1209,7 +1442,7 @@ export const BedEditor: React.FC<BedEditorProps> = ({
 
               <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
                 <button
-                  onClick={() => onToggleDripCell(activeBed.id, inspectedCoord)}
+                  onClick={() => onToggleDripCell(activeBed.id, parsePlantingKey(inspectedCoord).squareCoord)}
                   className={`px-2.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 shrink-0 ${
                     inspectedDrip
                       ? 'bg-sky-500 text-stone-950'
@@ -1220,7 +1453,7 @@ export const BedEditor: React.FC<BedEditorProps> = ({
                   <span>{inspectedDrip ? 'Drip On' : '+ Drip'}</span>
                 </button>
                 <button
-                  onClick={() => onToggleCage(activeBed.id, inspectedCoord)}
+                  onClick={() => onToggleCage(activeBed.id, parsePlantingKey(inspectedCoord).squareCoord)}
                   className={`px-2.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 shrink-0 ${
                     inspectedCaged
                       ? 'bg-amber-400 text-stone-950'
@@ -1231,7 +1464,7 @@ export const BedEditor: React.FC<BedEditorProps> = ({
                   <span>{inspectedCaged ? 'Cage On' : '+ Cage'}</span>
                 </button>
                 <button
-                  onClick={() => onToggleArchCell(activeBed.id, inspectedCoord)}
+                  onClick={() => onToggleArchCell(activeBed.id, parsePlantingKey(inspectedCoord).squareCoord)}
                   className={`px-2.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 shrink-0 ${
                     inspectedArch
                       ? 'bg-cyan-400 text-stone-950'
@@ -1241,6 +1474,7 @@ export const BedEditor: React.FC<BedEditorProps> = ({
                   <Columns className="w-3.5 h-3.5" />
                   <span>{inspectedArch ? 'Arch On' : '+ Arch'}</span>
                 </button>
+                {renderInspectorSplit(true)}
                 <button
                   onClick={() => onOpenPlantGuide(inspectedEval.plant.id)}
                   className="px-2.5 py-1.5 rounded-xl bg-stone-800 text-emerald-300 text-xs font-bold shrink-0"
@@ -1458,16 +1692,9 @@ export const BedEditor: React.FC<BedEditorProps> = ({
         initialHeight={activeBed.height}
         initialBedType={activeBed.bedType || 'standard'}
         initialWalkwayWidth={activeBed.walkwayWidth || 2}
-        onSave={(name, width, height, bedType, walkwayWidth) =>
-          onResizeOrRenameBed(
-            activeBed.id,
-            name,
-            width,
-            height,
-            bedType,
-            walkwayWidth
-          )
-        }
+        initialArchStart={activeBed.bedType === 'arch_box' ? archRange.start : undefined}
+        initialArchLength={activeBed.bedType === 'arch_box' ? archRange.length : undefined}
+        onSave={(config) => onResizeOrRenameBed(activeBed.id, config)}
       />
     </div>
   );

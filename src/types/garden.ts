@@ -41,20 +41,38 @@ export interface PlantInfo {
   sun: 'Full Sun' | 'Part Shade' | 'Full Sun / Part Shade';
 }
 
-export type GardenBedType = 'standard' | 'arch_box' | 'tomato_arch';
+export type GardenBedType = 'standard' | 'arch_box';
 export type BedIrrigationType = 'none' | 'drip_lines' | 'soaker_hose' | 'micro_sprayers';
+
+/** Allowed N×N planting subdivisions inside a single 1 sq ft square */
+export type SquareDivision = 1 | 2 | 3 | 4;
+
+/** Settings captured by the Create / Configure Bed modal */
+export interface BedConfig {
+  name: string;
+  width: number;
+  height: number;
+  bedType: GardenBedType;
+  walkwayWidth: number;
+  archStart?: number;
+  archLength?: number;
+}
 
 export interface GardenBed {
   id: string;
   name: string;
   bedType?: GardenBedType;
   walkwayWidth?: number;
+  archStart?: number;  // Arch Box only: arch offset (ft) from the start (row 0) of the bed
+  archLength?: number; // Arch Box only: arch span length (ft); defaults to full bed length
   irrigationType?: BedIrrigationType; // Bed-wide irrigation mode
   width: number;
   height: number;
   x: number;
   y: number;
-  cells: Record<string, string>;        // "col,row" -> plantId
+  cells: Record<string, string>;        // "col,row" -> plantId (whole, undivided square)
+  subdivisions?: Record<string, number>; // "col,row" -> N (square split into N×N planting slots)
+  subCells?: Record<string, string>;     // "col,row:sx,sy" -> plantId (sub-slot inside a split square)
   cagedCells?: Record<string, boolean>; // "col,row" -> true if caged
   archCells?: Record<string, boolean>;  // "col,row" -> true if under a tomato arch trellis
   dripCells?: Record<string, boolean>;  // "col,row" -> true if custom drip emitter / line on cell

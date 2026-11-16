@@ -18,6 +18,7 @@ import {
   Firestore,
 } from 'firebase/firestore';
 import { GardenLayout, UserProfile, YardElement } from '../types/garden';
+import { normalizeLayout } from '../utils/companionChecker';
 
 /**
  * ============================================================================
@@ -325,7 +326,9 @@ export function loadLocalLayouts(): GardenLayout[] {
           yardDripCells: DEFAULT_YARD_DRIP_CELLS,
         };
       }
-      return nextLayout;
+      const normalized = normalizeLayout(nextLayout);
+      if (normalized !== nextLayout) upgraded = true;
+      return normalized;
     });
     if (upgraded) {
       localStorage.setItem(LOCAL_LAYOUTS_KEY, JSON.stringify(migrated));
@@ -434,7 +437,7 @@ export async function fetchUserLayouts(uid: string): Promise<GardenLayout[]> {
     const snap = await getDocs(collection(db, 'users', uid, 'layouts'));
     const layouts: GardenLayout[] = [];
     snap.forEach((docSnap) => {
-      layouts.push(docSnap.data() as GardenLayout);
+      layouts.push(normalizeLayout(docSnap.data() as GardenLayout));
     });
     if (layouts.length > 0) {
       return layouts.sort((a, b) => b.updatedAt - a.updatedAt);

@@ -7,6 +7,164 @@ import {
   PlantInfo,
 } from '../types/garden';
 
+/** Maximum length / width (ft) for any single garden bed */
+export const MAX_BED_FT = 50;
+/** Maximum width (ft) of each of the two boxes in an Arch Box bed */
+export const MAX_ARCH_BOX_EACH_W = 12;
+/** Allowed N×N sub-grid options inside a 1 sq ft square */
+export const SQUARE_DIVISION_OPTIONS = [1, 2, 3, 4] as const;
+
+const EPS = 1e-6;
+
+// ---------------------------------------------------------------------------
+// Planting keys & square subdivisions
+// ---------------------------------------------------------------------------
+
+/** Key for a sub-slot inside a split square, e.g. "2,3:1,0" */
+export function makeSlotKey(col: number, row: number, sx: number, sy: number): string {
+  return `${col},${row}:${sx},${sy}`;
+}
+
+export interface ParsedPlantingKey {
+  col: number;
+  row: number;
+  squareCoord: string;
+  sx?: number;
+  sy?: number;
+  isSlot: boolean;
+}
+
+/** Parses either a whole-square key ("c,r") or a sub-slot key ("c,r:sx,sy") */
+export function parsePlantingKey(key: string): ParsedPlantingKey {
+  const [square, slot] = key.split(':');
+  const [col, row] = square.split(',').map(Number);
+  if (slot) {
+    const [sx, sy] = slot.split(',').map(Number);
+    return { col, row, squareCoord: square, sx, sy, isSlot: true };
+  }
+  return { col, row, squareCoord: square, isSlot: false };
+}
+
+/** Returns the N of the N×N planting grid in a square (1 = undivided) */
+export function getSquareDivision(bed: GardenBed, coord: string): number {
+  const n = Number(bed.subdivisions?.[coord] || 1);
+  return n >= 2 && n <= 4 ? Math.floor(n) : 1;
+}
+
+export interface BedPlanting {
+  key: string;         // "c,r" or "c,r:sx,sy"
+  squareCoord: string; // "c,r"
+  col: number;
+  row: number;
+  x: number;           // footprint origin in ft
+  y: number;
+  size: number;        // footprint size in ft (1, 1/2, 1/3, 1/4)
+  plant: PlantInfo;
+}
+
+/** Lists every planted whole square and sub-slot in a bed with its exact footprint (ft). */
+export function getBedPlantings(bed: GardenBed): BedPlanting[] {
+  const list: BedPlanting[] = [];
+  for (const [coord, plantId] of Object.entries(bed.cells || {})) {
+    const plant = PLANT_MAP[plantId];
+    if (!plant) continue;
+    if (getSquareDivision(bed, coord) > 1) continue;
+    const [col, row] = coord.split(',').map(Number);
+    if (col >= bed.width || row >= bed.height) continue;
+    list.push({ key: coord, squareCoord: coord, col, row, x: col, y: row, size: 1, plant });
+  }
+  for (const [key, plantId] of Object.entries(bed.subCells || {})) {
+    const plant = PLANT_MAP[plantId];
+    if (!plant) continue;
+    const parsed = parsePlantingKey(key);
+    if (!parsed.isSlot) continue;
+    const div = getSquareDivision(bed, parsed.squareCoord);
+    const sx = parsed.sx!;
+    const sy = parsed.sy!;
+    if (div <= 1 || sx >= div || sy >= div) continue;
+    if (parsed.col >= bed.width || parsed.row >= bed.height) continue;
+    list.push({
+      key,
+      squareCoord: parsed.squareCoord,
+      col: parsed.col,
+      row: parsed.row,
+      x: parsed.col + sx / div,
+      y: parsed.row + sy / div,
+      size: 1 / div,
+      plant,
+    });
+  }
+  return list;
+}
+
+/** All plants (with duplicates) occupying a 1 sq ft square, whole or subdivided */
+export function getPlantsInSquare(bed: GardenBed, coord: string): PlantInfo[] {
+  const div = getSquareDivision(bed, coord);
+  if (div <= 1) {
+    const p = bed.cells?.[coord] ? PLANT_MAP[bed.cells[coord]] : undefined;
+    return p ? [p] : [];
+  }
+  const [col, row] = coord.split(',').map(Number);
+  const plants: PlantInfo[] = [];
+  for (let sy = 0; sy < div; sy++) {
+    for (let sx = 0; sx < div; sx++) {
+      const pid = bed.subCells?.[makeSlotKey(col, row, sx, sy)];
+      const p = pid ? PLANT_MAP[pid] : undefined;
+      if (p) plants.push(p);
+    }
+  }
+  return plants;
+}
+
+/** The plant that drives square-level defaults (e.g. auto cage): a cage-needing plant wins */
+export function getSquareRepresentativePlant(
+  bed: GardenBed,
+  coord: string
+): PlantInfo | null {
+  const plants = getPlantsInSquare(bed, coord);
+  return plants.find((p) => p.needsCage) || plants[0] || null;
+}
+
+// ---------------------------------------------------------------------------
+// Arch span & legacy migration
+// ---------------------------------------------------------------------------
+
+/** Returns the arch span along the bed length in ft: [start, end) */
+export function getArchRange(bed: GardenBed): { start: number; end: number; length: number } {
+  const h = Math.max(1, bed.height);
+  const rawLen = Number(bed.archLength);
+  const length = Number.isFinite(rawLen) && rawLen > 0 ? Math.min(h, rawLen) : h;
+  const rawStart = Number(bed.archStart);
+  const start = Number.isFinite(rawStart)
+    ? Math.max(0, Math.min(h - length, rawStart))
+    : 0;
+  return { start, end: start + length, length };
+}
+
+/**
+ * Upgrades saved beds to the current schema.
+ * - Legacy `tomato_arch` beds become `standard` beds with their outer-column arch cells preserved.
+ */
+export function normalizeBed(bed: GardenBed): GardenBed {
+  if ((bed.bedType as string) === 'tomato_arch') {
+    const archCells = { ...(bed.archCells || {}) };
+    for (let r = 0; r < bed.height; r++) {
+      for (const c of new Set([0, bed.width - 1])) {
+        const key = `${c},${r}`;
+        if (!(key in archCells)) archCells[key] = true;
+      }
+    }
+    return { ...bed, bedType: 'standard', archCells };
+  }
+  return bed;
+}
+
+export function normalizeLayout(layout: GardenLayout): GardenLayout {
+  const needs = (layout.beds || []).some((b) => (b.bedType as string) === 'tomato_arch');
+  if (!needs) return layout;
+  return { ...layout, beds: layout.beds.map(normalizeBed) };
+}
+
 export function getRelationshipReason(
   plantA: PlantInfo,
   plantB: PlantInfo,
@@ -80,10 +238,10 @@ export function isCellUnderArch(bed: GardenBed, col: number, row: number): boole
   }
   if (bed.bedType === 'arch_box') {
     const splitCol = Math.max(1, Math.floor(bed.width / 2));
-    return col === splitCol - 1 || col === splitCol;
-  }
-  if (bed.bedType === 'tomato_arch') {
-    return col === 0 || col === bed.width - 1;
+    if (col !== splitCol - 1 && col !== splitCol) return false;
+    const { start, end } = getArchRange(bed);
+    // Row r spans [r, r+1) ft — it's under the arch if it overlaps the arch span
+    return row + 1 > start + EPS && row < end - EPS;
   }
   return false;
 }
@@ -98,46 +256,75 @@ export function doesCellHaveDrip(bed: GardenBed, coord: string): boolean {
   return Boolean(bed.irrigationType && bed.irrigationType !== 'none');
 }
 
-const NEIGHBOR_DELTAS = [
-  [-1, -1], [0, -1], [1, -1],
-  [-1,  0],          [1,  0],
-  [-1,  1], [0,  1], [1,  1],
-];
+/** True if two footprints share an edge or corner (the 8-neighbour rule, generalised to sub-slots) */
+function footprintsTouch(
+  a: { x: number; y: number; size: number },
+  b: { x: number; y: number; size: number }
+): boolean {
+  const gapX = Math.max(a.x, b.x) - Math.min(a.x + a.size, b.x + b.size);
+  const gapY = Math.max(a.y, b.y) - Math.min(a.y + a.size, b.y + b.size);
+  return gapX <= EPS && gapY <= EPS;
+}
+
+export interface PlantingIndex {
+  list: BedPlanting[];
+  bySquare: Map<string, BedPlanting[]>;
+}
+
+export function buildPlantingIndex(bed: GardenBed): PlantingIndex {
+  const list = getBedPlantings(bed);
+  const bySquare = new Map<string, BedPlanting[]>();
+  for (const p of list) {
+    const arr = bySquare.get(p.squareCoord);
+    if (arr) arr.push(p);
+    else bySquare.set(p.squareCoord, [p]);
+  }
+  return { list, bySquare };
+}
+
+/**
+ * Finds all plantings touching the given footprint (excluding the footprint's own key),
+ * respecting the left/right box split of Arch Box beds.
+ */
+export function findTouchingPlantings(
+  bed: GardenBed,
+  index: PlantingIndex,
+  target: { key: string; col: number; row: number; x: number; y: number; size: number }
+): BedPlanting[] {
+  const isArchBox = bed.bedType === 'arch_box';
+  const splitCol = Math.max(1, Math.floor(bed.width / 2));
+  const result: BedPlanting[] = [];
+  for (let dr = -1; dr <= 1; dr++) {
+    for (let dc = -1; dc <= 1; dc++) {
+      const nCol = target.col + dc;
+      const nRow = target.row + dr;
+      if (nCol < 0 || nCol >= bed.width || nRow < 0 || nRow >= bed.height) continue;
+      if (isArchBox && target.col < splitCol !== nCol < splitCol) continue;
+      const bucket = index.bySquare.get(`${nCol},${nRow}`);
+      if (!bucket) continue;
+      for (const q of bucket) {
+        if (q.key === target.key) continue;
+        if (footprintsTouch(target, q)) result.push(q);
+      }
+    }
+  }
+  return result;
+}
 
 export function evaluateBedCells(bed: GardenBed): Record<string, CellEvaluation> {
   const evaluations: Record<string, CellEvaluation> = {};
-  const isArchBox = bed.bedType === 'arch_box';
-  const splitCol = Math.max(1, Math.floor(bed.width / 2));
+  const index = buildPlantingIndex(bed);
 
-  for (const [coord, plantId] of Object.entries(bed.cells)) {
-    const plant = PLANT_MAP[plantId];
-    if (!plant) continue;
-
-    const [colStr, rowStr] = coord.split(',');
-    const col = parseInt(colStr, 10);
-    const row = parseInt(rowStr, 10);
-
+  for (const p of index.list) {
+    const plant = p.plant;
+    const coord = p.key;
     const conflicts: NeighborRelation[] = [];
     const waterMismatches: NeighborRelation[] = [];
     const synergies: NeighborRelation[] = [];
 
-    for (const [dx, dy] of NEIGHBOR_DELTAS) {
-      const nCol = col + dx;
-      const nRow = row + dy;
-      if (nCol < 0 || nCol >= bed.width || nRow < 0 || nRow >= bed.height) continue;
-
-      if (isArchBox) {
-        const isLeftA = col < splitCol;
-        const isLeftB = nCol < splitCol;
-        if (isLeftA !== isLeftB) continue;
-      }
-
-      const nCoord = `${nCol},${nRow}`;
-      const neighborPlantId = bed.cells[nCoord];
-      if (!neighborPlantId) continue;
-
-      const neighborPlant = PLANT_MAP[neighborPlantId];
-      if (!neighborPlant) continue;
+    for (const q of findTouchingPlantings(bed, index, p)) {
+      const neighborPlant = q.plant;
+      const nCoord = q.key;
 
       const rel = checkPairCompatibility(plant.id, neighborPlant.id);
       if (rel === 'antagonist') {
@@ -185,7 +372,7 @@ export function getBedSummaryStats(bed: GardenBed) {
   let synergyTileCount = 0;
   let cagedTileCount = 0;
   let dripTileCount = 0;
-  const totalPlanted = Object.keys(bed.cells).length;
+  const totalPlanted = Object.keys(evaluations).length;
 
   for (let r = 0; r < bed.height; r++) {
     for (let c = 0; c < bed.width; c++) {
@@ -193,13 +380,10 @@ export function getBedSummaryStats(bed: GardenBed) {
       if (doesCellHaveDrip(bed, coord)) {
         dripTileCount++;
       }
-    }
-  }
-
-  for (const [coord, plantId] of Object.entries(bed.cells)) {
-    const plant = PLANT_MAP[plantId];
-    if (doesCellHaveCage(bed, coord, plant)) {
-      cagedTileCount++;
+      const plant = getSquareRepresentativePlant(bed, coord);
+      if (plant && doesCellHaveCage(bed, coord, plant)) {
+        cagedTileCount++;
+      }
     }
   }
 

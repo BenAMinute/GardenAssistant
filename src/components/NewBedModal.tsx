@@ -1,38 +1,61 @@
 import React, { useEffect, useState } from 'react';
 import { X, Plus, Ruler, Columns } from 'lucide-react';
-import { GardenBedType } from '../types/garden';
+import { BedConfig, GardenBedType } from '../types/garden';
+import { MAX_ARCH_BOX_EACH_W, MAX_BED_FT } from '../utils/companionChecker';
 
 interface NewBedModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (
-    name: string,
-    width: number,
-    height: number,
-    bedType: GardenBedType,
-    walkwayWidth: number
-  ) => void;
+  onSave: (config: BedConfig) => void;
   initialName?: string;
   initialWidth?: number;
   initialHeight?: number;
   initialBedType?: GardenBedType;
   initialWalkwayWidth?: number;
+  initialArchStart?: number;
+  initialArchLength?: number;
   title?: string;
 }
+
+type ArchPosition = 'start' | 'center' | 'end' | 'custom';
 
 const STANDARD_PRESETS = [
   { label: '4 × 4 ft Classic Square', width: 4, height: 4 },
   { label: '4 × 8 ft Raised Bed', width: 4, height: 8 },
-  { label: '8 × 4 ft Horizontal Bed', width: 8, height: 4 },
+  { label: '4 × 12 ft Long Bed', width: 4, height: 12 },
+  { label: '4 × 20 ft Row Bed', width: 4, height: 20 },
+  { label: '3 × 24 ft Fence Bed', width: 3, height: 24 },
   { label: '3 × 6 ft Patio Bed', width: 3, height: 6 },
 ];
 
 const ARCH_BOX_PRESETS = [
-  { label: 'Two 2×6 ft Boxes + 2ft Arch (4×6 total)', width: 4, height: 6, walkway: 2 },
-  { label: 'Two 2×8 ft Boxes + 3ft Arch (4×8 total)', width: 4, height: 8, walkway: 3 },
-  { label: 'Two 3×6 ft Boxes + 2ft Arch (6×6 total)', width: 6, height: 6, walkway: 2 },
-  { label: 'Two 4×8 ft Boxes + 3ft Arch (8×8 total)', width: 8, height: 8, walkway: 3 },
+  { label: 'Two 2×6 ft Boxes + 2ft Arch', width: 4, height: 6, walkway: 2 },
+  { label: 'Two 2×8 ft Boxes + 3ft Arch', width: 4, height: 8, walkway: 3 },
+  { label: 'Two 3×12 ft Boxes + 3ft Arch', width: 6, height: 12, walkway: 3 },
+  { label: 'Two 4×8 ft Boxes + 3ft Arch', width: 8, height: 8, walkway: 3 },
+  { label: 'Two 3×20 ft Boxes + 4ft Arch', width: 6, height: 20, walkway: 4 },
 ];
+
+const ARCH_POSITIONS: Array<{ id: ArchPosition; label: string }> = [
+  { id: 'start', label: 'Start' },
+  { id: 'center', label: 'Center' },
+  { id: 'end', label: 'End' },
+  { id: 'custom', label: 'Custom' },
+];
+
+const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
+/** Round to the nearest half foot */
+const roundHalf = (n: number) => Math.round(n * 2) / 2;
+const fmtFt = (n: number) => (Number.isInteger(n) ? `${n}` : n.toFixed(1));
+
+/** Figure out which position preset matches a saved arch start/length */
+function detectArchPosition(start: number, length: number, height: number): ArchPosition {
+  const eps = 0.01;
+  if (Math.abs(start) < eps) return 'start';
+  if (Math.abs(start - (height - length) / 2) < eps) return 'center';
+  if (Math.abs(start - (height - length)) < eps) return 'end';
+  return 'custom';
+}
 
 export const NewBedModal: React.FC<NewBedModalProps> = ({
   isOpen,
@@ -43,6 +66,8 @@ export const NewBedModal: React.FC<NewBedModalProps> = ({
   initialHeight = 4,
   initialBedType = 'standard',
   initialWalkwayWidth = 2,
+  initialArchStart,
+  initialArchLength,
   title = 'Create New Garden Bed',
 }) => {
   const [bedType, setBedType] = useState<GardenBedType>(initialBedType);
@@ -50,60 +75,97 @@ export const NewBedModal: React.FC<NewBedModalProps> = ({
   const [width, setWidth] = useState(initialWidth);
   const [height, setHeight] = useState(initialHeight);
   const [walkwayWidth, setWalkwayWidth] = useState(initialWalkwayWidth);
+  const [archLength, setArchLength] = useState(initialArchLength ?? initialHeight);
+  const [archPosition, setArchPosition] = useState<ArchPosition>('start');
+  const [archOffset, setArchOffset] = useState(initialArchStart ?? 0);
 
   useEffect(() => {
     if (isOpen) {
       setBedType(initialBedType);
       setName(
         initialName ||
-          (initialBedType === 'arch_box'
-            ? 'Twin Arch Box (Tomato & Vine Arch)'
-            : initialBedType === 'tomato_arch'
-            ? 'Tomato Arch Bed'
-            : 'Raised Bed')
+          (initialBedType === 'arch_box' ? 'Twin Arch Box (2 Linked Beds)' : 'Raised Bed')
       );
       setWidth(initialWidth);
       setHeight(initialHeight);
       setWalkwayWidth(initialWalkwayWidth);
+      const len = clamp(initialArchLength ?? initialHeight, 0.5, initialHeight);
+      const start = clamp(initialArchStart ?? 0, 0, initialHeight - len);
+      setArchLength(len);
+      setArchOffset(start);
+      setArchPosition(detectArchPosition(start, len, initialHeight));
     }
-  }, [isOpen, initialName, initialWidth, initialHeight, initialBedType, initialWalkwayWidth]);
+  }, [
+    isOpen,
+    initialName,
+    initialWidth,
+    initialHeight,
+    initialBedType,
+    initialWalkwayWidth,
+    initialArchStart,
+    initialArchLength,
+  ]);
 
   if (!isOpen) return null;
+
+  // ---- Derived arch span (in ft along bed length) ----
+  const safeHeight = clamp(Number(height) || 1, 1, MAX_BED_FT);
+  const effArchLength = clamp(roundHalf(Number(archLength) || safeHeight), 0.5, safeHeight);
+  const maxOffset = safeHeight - effArchLength;
+  const effArchStart =
+    archPosition === 'start'
+      ? 0
+      : archPosition === 'center'
+      ? maxOffset / 2
+      : archPosition === 'end'
+      ? maxOffset
+      : clamp(roundHalf(Number(archOffset) || 0), 0, maxOffset);
+  const effArchEnd = effArchStart + effArchLength;
+
+  const updateHeight = (h: number) => {
+    // If the arch was spanning the full bed, keep it full-length as the bed grows/shrinks
+    if (archLength === height) setArchLength(h);
+    setHeight(h);
+  };
 
   const handleSelectBedType = (nextType: GardenBedType) => {
     setBedType(nextType);
     if (nextType === 'arch_box') {
       // Ensure even width so each of the two boxes has equal columns
       if (width % 2 !== 0) setWidth(Math.max(4, width + 1));
-      if (!initialName && (name === 'Raised Bed' || name === 'Tomato Arch Bed')) {
+      if (!initialName && name === 'Raised Bed') {
         setName('Twin Arch Box (2 Linked Beds)');
       }
-    } else if (nextType === 'tomato_arch') {
-      if (!initialName && (name === 'Raised Bed' || name.startsWith('Twin Arch'))) {
-        setName('Tomato Arch Bed');
-      }
+    } else if (!initialName && name.startsWith('Twin Arch')) {
+      setName('Raised Bed');
     }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    let clampedW = Math.max(2, Math.min(16, Number(width) || 4));
+    const maxW = bedType === 'arch_box' ? MAX_ARCH_BOX_EACH_W * 2 : MAX_BED_FT;
+    let clampedW = clamp(Number(width) || 4, bedType === 'arch_box' ? 2 : 1, maxW);
     if (bedType === 'arch_box' && clampedW % 2 !== 0) {
       clampedW += 1; // Keep even number of total columns across the 2 boxes
     }
-    const clampedH = Math.max(1, Math.min(16, Number(height) || 4));
-    const clampedWalkway = Math.max(1, Math.min(6, Number(walkwayWidth) || 2));
-    onSave(
-      name.trim() || `Garden Bed (${clampedW}×${clampedH} ft)`,
-      clampedW,
-      clampedH,
+    const clampedH = safeHeight;
+    const clampedWalkway = clamp(Number(walkwayWidth) || 2, 1, 8);
+    onSave({
+      name: name.trim() || `Garden Bed (${clampedW}×${clampedH} ft)`,
+      width: clampedW,
+      height: clampedH,
       bedType,
-      clampedWalkway
-    );
+      walkwayWidth: clampedWalkway,
+      ...(bedType === 'arch_box'
+        ? { archStart: effArchStart, archLength: effArchLength }
+        : {}),
+    });
     onClose();
   };
 
   const perBoxWidth = Math.max(1, Math.floor(width / 2));
+  const inputClass =
+    'w-full px-3 py-2 rounded-xl border border-stone-200 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-500';
 
   return (
     <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
@@ -124,14 +186,15 @@ export const NewBedModal: React.FC<NewBedModalProps> = ({
         </div>
 
         <form onSubmit={handleSubmit} className="mt-4 space-y-4">
-          {/* Bed Style Selector: Standard vs Double Arch Box vs Tomato Arch */}
+          {/* Bed Style Selector: Standard vs Double Arch Box */}
           <div>
             <label className="block text-xs font-semibold uppercase tracking-wider text-stone-600 mb-1.5">
               Garden Bed Style
             </label>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
+                id="bed-style-standard"
                 onClick={() => handleSelectBedType('standard')}
                 className={`p-2.5 rounded-xl border text-left transition ${
                   bedType === 'standard'
@@ -147,6 +210,7 @@ export const NewBedModal: React.FC<NewBedModalProps> = ({
 
               <button
                 type="button"
+                id="bed-style-arch-box"
                 onClick={() => handleSelectBedType('arch_box')}
                 className={`p-2.5 rounded-xl border text-left transition ${
                   bedType === 'arch_box'
@@ -159,22 +223,7 @@ export const NewBedModal: React.FC<NewBedModalProps> = ({
                   <span>Arch Box (2 Boxes)</span>
                 </div>
                 <div className="text-[10px] text-stone-500 mt-0.5">
-                  Two boxes joined by a center arch, edited as one!
-                </div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => handleSelectBedType('tomato_arch')}
-                className={`p-2.5 rounded-xl border text-left transition ${
-                  bedType === 'tomato_arch'
-                    ? 'border-emerald-600 bg-emerald-50/90 ring-2 ring-emerald-500/30'
-                    : 'border-stone-200 bg-stone-50 hover:bg-stone-100'
-                }`}
-              >
-                <div className="font-bold text-xs text-stone-900">🍅 Tomato Arch Bed</div>
-                <div className="text-[10px] text-stone-500 mt-0.5">
-                  Bed with overhead tomato arch trellis
+                  Two boxes joined by an arch, edited as one!
                 </div>
               </button>
             </div>
@@ -186,9 +235,10 @@ export const NewBedModal: React.FC<NewBedModalProps> = ({
             </label>
             <input
               type="text"
+              id="bed-name-input"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="e.g., Twin Tomato Arch Box"
+              placeholder="e.g., Twin Cucumber Arch Box"
               className="w-full px-3.5 py-2 rounded-xl border border-stone-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
             />
           </div>
@@ -211,7 +261,7 @@ export const NewBedModal: React.FC<NewBedModalProps> = ({
                         type="button"
                         onClick={() => {
                           setWidth(preset.width);
-                          setHeight(preset.height);
+                          updateHeight(preset.height);
                           setWalkwayWidth(preset.walkway);
                         }}
                         className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition ${
@@ -232,7 +282,7 @@ export const NewBedModal: React.FC<NewBedModalProps> = ({
                         type="button"
                         onClick={() => {
                           setWidth(preset.width);
-                          setHeight(preset.height);
+                          updateHeight(preset.height);
                         }}
                         className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition ${
                           active
@@ -255,40 +305,43 @@ export const NewBedModal: React.FC<NewBedModalProps> = ({
                 </label>
                 <input
                   type="number"
+                  id="bed-box-width-input"
                   min={1}
-                  max={8}
+                  max={MAX_ARCH_BOX_EACH_W}
                   value={perBoxWidth}
                   onChange={(e) => {
-                    const eachW = Math.max(1, Math.min(8, Number(e.target.value) || 2));
+                    const eachW = clamp(Number(e.target.value) || 1, 1, MAX_ARCH_BOX_EACH_W);
                     setWidth(eachW * 2);
                   }}
-                  className="w-full px-3 py-2 rounded-xl border border-stone-200 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  className={inputClass}
                 />
               </div>
               <div>
                 <label className="block text-xs font-semibold text-stone-600 mb-1">
-                  Length (ft)
+                  Bed Length (ft)
                 </label>
                 <input
                   type="number"
+                  id="bed-length-input"
                   min={1}
-                  max={16}
+                  max={MAX_BED_FT}
                   value={height}
-                  onChange={(e) => setHeight(Number(e.target.value))}
-                  className="w-full px-3 py-2 rounded-xl border border-stone-200 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  onChange={(e) => updateHeight(Number(e.target.value))}
+                  className={inputClass}
                 />
               </div>
               <div>
                 <label className="block text-xs font-semibold text-stone-600 mb-1">
-                  Arch Gap (ft)
+                  Walkway Width (ft)
                 </label>
                 <input
                   type="number"
+                  id="bed-walkway-input"
                   min={1}
-                  max={6}
+                  max={8}
                   value={walkwayWidth}
                   onChange={(e) => setWalkwayWidth(Number(e.target.value))}
-                  className="w-full px-3 py-2 rounded-xl border border-stone-200 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  className={inputClass}
                 />
               </div>
             </div>
@@ -300,11 +353,12 @@ export const NewBedModal: React.FC<NewBedModalProps> = ({
                 </label>
                 <input
                   type="number"
+                  id="bed-width-input"
                   min={1}
-                  max={16}
+                  max={MAX_BED_FT}
                   value={width}
                   onChange={(e) => setWidth(Number(e.target.value))}
-                  className="w-full px-3 py-2 rounded-xl border border-stone-200 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  className={inputClass}
                 />
               </div>
               <div>
@@ -313,24 +367,165 @@ export const NewBedModal: React.FC<NewBedModalProps> = ({
                 </label>
                 <input
                   type="number"
+                  id="bed-length-input"
                   min={1}
-                  max={16}
+                  max={MAX_BED_FT}
                   value={height}
-                  onChange={(e) => setHeight(Number(e.target.value))}
-                  className="w-full px-3 py-2 rounded-xl border border-stone-200 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  onChange={(e) => updateHeight(Number(e.target.value))}
+                  className={inputClass}
                 />
               </div>
             </div>
           )}
 
-          <div className="bg-stone-50 rounded-xl p-3 border border-stone-200/80 flex items-center justify-between text-xs text-stone-600">
+          {/* ===== Arch Span (Arch Box only) ===== */}
+          {bedType === 'arch_box' && (
+            <div className="rounded-2xl border border-cyan-200 bg-gradient-to-br from-cyan-50 to-sky-50/60 p-3.5 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold uppercase tracking-wider text-cyan-900 flex items-center gap-1.5">
+                  🍅 Arch Span
+                </span>
+                <span className="text-[11px] font-semibold text-cyan-800">
+                  {effArchLength >= safeHeight
+                    ? 'Covers the full bed length'
+                    : `Covers ${fmtFt(effArchLength)}′ of ${fmtFt(safeHeight)}′`}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-xs font-semibold text-stone-600 mb-1">
+                    Arch Length (ft)
+                  </label>
+                  <input
+                    type="number"
+                    id="arch-length-input"
+                    min={0.5}
+                    max={safeHeight}
+                    step={0.5}
+                    value={archLength}
+                    onChange={(e) => setArchLength(Number(e.target.value))}
+                    className={inputClass}
+                  />
+                  <div className="flex gap-1 mt-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setArchLength(safeHeight)}
+                      className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-white border border-cyan-200 text-cyan-800 hover:bg-cyan-100"
+                    >
+                      Full
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setArchLength(Math.max(0.5, roundHalf(safeHeight / 2)))}
+                      className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-white border border-cyan-200 text-cyan-800 hover:bg-cyan-100"
+                    >
+                      Half
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-stone-600 mb-1">
+                    Arch Position
+                  </label>
+                  <div className="grid grid-cols-2 gap-1">
+                    {ARCH_POSITIONS.map((pos) => (
+                      <button
+                        key={pos.id}
+                        type="button"
+                        id={`arch-position-${pos.id}`}
+                        onClick={() => {
+                          if (pos.id === 'custom') setArchOffset(effArchStart);
+                          setArchPosition(pos.id);
+                        }}
+                        className={`px-2 py-1.5 rounded-lg text-[11px] font-semibold border transition ${
+                          archPosition === pos.id
+                            ? 'bg-cyan-700 text-white border-cyan-700 shadow-xs'
+                            : 'bg-white text-stone-700 border-stone-200 hover:bg-cyan-50'
+                        }`}
+                      >
+                        {pos.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {archPosition === 'custom' && (
+                <div>
+                  <label className="block text-xs font-semibold text-stone-600 mb-1">
+                    Arch starts this far from the bed start (ft)
+                  </label>
+                  <input
+                    type="number"
+                    id="arch-offset-input"
+                    min={0}
+                    max={maxOffset}
+                    step={0.5}
+                    value={archOffset}
+                    onChange={(e) => setArchOffset(Number(e.target.value))}
+                    className={inputClass}
+                  />
+                </div>
+              )}
+
+              {/* Live to-scale diagram of the bed length with the arch span highlighted */}
+              <div>
+                <div className="relative h-9 rounded-lg bg-amber-900/90 border-2 border-amber-800 overflow-hidden">
+                  {/* 1 ft tick marks */}
+                  {safeHeight <= MAX_BED_FT &&
+                    Array.from({ length: Math.max(0, Math.floor(safeHeight) - 1) }).map((_, i) => (
+                      <div
+                        key={i}
+                        className="absolute top-0 bottom-0 w-px bg-amber-200/20"
+                        style={{ left: `${((i + 1) / safeHeight) * 100}%` }}
+                      />
+                    ))}
+                  <div
+                    className="absolute top-1 bottom-1 rounded-md bg-gradient-to-r from-cyan-500 via-cyan-300 to-cyan-500 border border-cyan-100 shadow-[0_0_12px_rgba(34,211,238,0.6)] flex items-center justify-center transition-all duration-300"
+                    style={{
+                      left: `${(effArchStart / safeHeight) * 100}%`,
+                      width: `${(effArchLength / safeHeight) * 100}%`,
+                    }}
+                  >
+                    <span className="text-[10px] font-extrabold text-cyan-950 whitespace-nowrap px-1 truncate">
+                      {fmtFt(effArchLength)}′ arch
+                    </span>
+                  </div>
+                </div>
+                <div className="relative h-4 mt-0.5 text-[10px] font-mono text-stone-500">
+                  <span className="absolute left-0">0′</span>
+                  {effArchStart > 0 && (
+                    <span
+                      className="absolute -translate-x-1/2 text-cyan-800 font-bold"
+                      style={{ left: `${(effArchStart / safeHeight) * 100}%` }}
+                    >
+                      {fmtFt(effArchStart)}′
+                    </span>
+                  )}
+                  {effArchEnd < safeHeight && (
+                    <span
+                      className="absolute -translate-x-1/2 text-cyan-800 font-bold"
+                      style={{ left: `${(effArchEnd / safeHeight) * 100}%` }}
+                    >
+                      {fmtFt(effArchEnd)}′
+                    </span>
+                  )}
+                  <span className="absolute right-0">{fmtFt(safeHeight)}′</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="bg-stone-50 rounded-xl p-3 border border-stone-200/80 flex items-center justify-between gap-2 text-xs text-stone-600">
             <span>
               {bedType === 'arch_box'
-                ? `Two ${perBoxWidth}′×${height}′ boxes + ${walkwayWidth}′ center arch:`
+                ? `Two ${perBoxWidth}′×${fmtFt(safeHeight)}′ boxes + ${walkwayWidth}′ walkway:`
                 : 'Total Planting Area:'}
             </span>
-            <span className="font-bold text-emerald-700 text-sm">
-              {Math.max(1, width) * Math.max(1, height)} sq ft planting area
+            <span className="font-bold text-emerald-700 text-sm whitespace-nowrap">
+              {Math.max(1, width) * Math.max(1, safeHeight)} sq ft planting area
             </span>
           </div>
 
@@ -344,6 +539,7 @@ export const NewBedModal: React.FC<NewBedModalProps> = ({
             </button>
             <button
               type="submit"
+              id="save-bed-button"
               className="px-5 py-2.5 rounded-xl text-sm font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm flex items-center gap-1.5 transition"
             >
               <Plus className="w-4 h-4" />

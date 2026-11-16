@@ -23,6 +23,7 @@ import {
   Layers,
 } from 'lucide-react';
 import {
+  BedConfig,
   GardenBed,
   GardenBedType,
   GardenLayout,
@@ -44,8 +45,12 @@ import {
   calculateLayoutDripTotals,
   doesCellHaveCage,
   doesCellHaveDrip,
+  getArchRange,
   getBedSummaryStats,
   getPipeCellConnections,
+  getSquareDivision,
+  getSquareRepresentativePlant,
+  makeSlotKey,
 } from '../utils/companionChecker';
 import { NewBedModal } from './NewBedModal';
 import { CageOverlay, DripCellOverlay } from './PlantSupportOverlay';
@@ -58,13 +63,7 @@ interface YardOverviewProps {
   selectedBedId: string | null;
   onSelectAndEditBed: (bedId: string) => void;
   onUpdateBedPosition: (bedId: string, x: number, y: number) => void;
-  onCreateBed: (
-    name: string,
-    width: number,
-    height: number,
-    bedType?: GardenBedType,
-    walkwayWidth?: number
-  ) => void;
+  onCreateBed: (config: BedConfig) => void;
   onDeleteBed: (bedId: string) => void;
   onDuplicateBed: (bedId: string) => void;
   onCreateElement: (
@@ -390,12 +389,23 @@ export const YardOverview: React.FC<YardOverviewProps> = ({
     stats: ReturnType<typeof getBedSummaryStats>
   ) => {
     const coord = `${colIdx},${rowIdx}`;
-    const plantId = bed.cells[coord];
-    const plant = plantId ? PLANT_MAP[plantId] : null;
-    const evalItem = stats.evaluations[coord];
-    const hasConflict = evalItem && evalItem.conflicts.length > 0;
-    const hasWaterWarning = evalItem && evalItem.waterMismatches.length > 0;
-    const hasSynergy = evalItem && !hasConflict && evalItem.synergies.length > 0;
+    const division = getSquareDivision(bed, coord);
+    // Representative plant drives border style + auto-cage (a cage-needing plant wins in split squares)
+    const plant = getSquareRepresentativePlant(bed, coord);
+    const evalKeys: string[] = [];
+    if (division > 1) {
+      for (let sy = 0; sy < division; sy++) {
+        for (let sx = 0; sx < division; sx++) {
+          evalKeys.push(makeSlotKey(colIdx, rowIdx, sx, sy));
+        }
+      }
+    } else {
+      evalKeys.push(coord);
+    }
+    const evalItems = evalKeys.map((k) => stats.evaluations[k]).filter(Boolean);
+    const hasConflict = evalItems.some((e) => e.conflicts.length > 0);
+    const hasWaterWarning = evalItems.some((e) => e.waterMismatches.length > 0);
+    const hasSynergy = !hasConflict && evalItems.some((e) => e.synergies.length > 0);
     const hasCage = doesCellHaveCage(bed, coord, plant);
     const hasDrip = doesCellHaveDrip(bed, coord);
     const hasCustomRoutedBedDrip = Boolean(
@@ -435,15 +445,41 @@ export const YardOverview: React.FC<YardOverviewProps> = ({
           />
         )}
         {hasCage && <CageOverlay compact />}
-        {plant && (
-          <span
+        {division > 1 ? (
+          <div
+            className="absolute inset-0 grid z-10 p-px"
             style={{
-              fontSize: `${Math.max(10, Math.min(18, Math.floor(cellPx * 0.45)))}px`,
+              gridTemplateColumns: `repeat(${division}, minmax(0, 1fr))`,
+              gridTemplateRows: `repeat(${division}, minmax(0, 1fr))`,
             }}
-            className="leading-none select-none drop-shadow-xs z-10"
           >
-            {plant.emoji}
-          </span>
+            {evalKeys.map((k) => {
+              const pid = bed.subCells?.[k];
+              const p = pid ? PLANT_MAP[pid] : null;
+              return (
+                <span
+                  key={k}
+                  style={{
+                    fontSize: `${Math.max(4, Math.floor((cellPx * 0.7) / division))}px`,
+                  }}
+                  className="leading-none flex items-center justify-center select-none overflow-hidden"
+                >
+                  {p?.emoji}
+                </span>
+              );
+            })}
+          </div>
+        ) : (
+          plant && (
+            <span
+              style={{
+                fontSize: `${Math.max(10, Math.min(18, Math.floor(cellPx * 0.45)))}px`,
+              }}
+              className="leading-none select-none drop-shadow-xs z-10"
+            >
+              {plant.emoji}
+            </span>
+          )
         )}
       </div>
     );
@@ -652,22 +688,6 @@ export const YardOverview: React.FC<YardOverviewProps> = ({
               <span className="text-2xl my-1">🏛️</span>
               <span className="text-xs font-bold text-cyan-950 text-center leading-tight">
                 Twin Arch Box
-              </span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                setNewBedDefaultType('tomato_arch');
-                setIsNewBedOpen(true);
-                setMobileSheet(null);
-              }}
-              className="p-2.5 rounded-2xl border-2 border-dashed border-red-400 bg-red-50/60 active:scale-95 flex flex-col items-center justify-between transition"
-            >
-              <span className="text-[10px] text-red-700 font-bold">+ ARCH</span>
-              <span className="text-2xl my-1">🍅</span>
-              <span className="text-xs font-bold text-red-950 text-center leading-tight">
-                Tomato Arch
               </span>
             </button>
           </>
@@ -1195,9 +1215,9 @@ export const YardOverview: React.FC<YardOverviewProps> = ({
                 const stats = bedStatsMap.get(bed.id)!;
 
                 const isArchBox = bed.bedType === 'arch_box';
-                const isTomatoArch = bed.bedType === 'tomato_arch';
                 const splitCol = Math.max(1, Math.floor(bed.width / 2));
                 const walkwayFt = isArchBox ? bed.walkwayWidth || 2 : 0;
+                const archRange = getArchRange(bed);
 
                 const leftPx = bed.x * cellPx + (isDragging ? dragState.dx : 0);
                 const topPx = bed.y * cellPx + (isDragging ? dragState.dy : 0);
@@ -1249,7 +1269,7 @@ export const YardOverview: React.FC<YardOverviewProps> = ({
                     {/* Compact Overlay Name & Status Badge at Top of Bed */}
                     <div
                       className={`absolute -top-5 left-0 right-0 flex items-center justify-between gap-1 px-1.5 py-0.5 rounded-t-lg text-[10px] font-bold shadow-xs z-20 pointer-events-none ${
-                        isArchBox || isTomatoArch
+                        isArchBox
                           ? 'bg-cyan-950/95 text-cyan-50'
                           : 'bg-amber-900/95 text-amber-50'
                       }`}
@@ -1335,18 +1355,22 @@ export const YardOverview: React.FC<YardOverviewProps> = ({
 
                         <div
                           style={{ width: `${walkwayFt * cellPx}px` }}
-                          className="relative flex flex-col justify-around py-1 bg-cyan-500/15 border-y-2 border-dashed border-cyan-600/80 shrink-0"
+                          className="relative bg-cyan-500/10 border-y-2 border-dashed border-cyan-600/60 shrink-0"
                         >
-                          {Array.from({ length: bed.height }).map((_, rIdx) => (
-                            <div
-                              key={rIdx}
-                              className="w-full h-2.5 border-y border-slate-300/90 bg-gradient-to-r from-slate-600/50 via-cyan-200/70 to-slate-600/50 flex items-center justify-center"
-                            >
+                          {/* Arch drawn to scale along the bed length (only over its measured span) */}
+                          <div
+                            className="absolute inset-x-0 border-y border-slate-300/90 bg-gradient-to-r from-slate-600/55 via-cyan-200/75 to-slate-600/55 flex items-center justify-center overflow-hidden"
+                            style={{
+                              top: `${(archRange.start / bed.height) * 100}%`,
+                              height: `${(archRange.length / bed.height) * 100}%`,
+                            }}
+                          >
+                            {archRange.length * cellPx >= 28 && (
                               <span className="text-[7px] font-mono font-bold text-slate-900 uppercase">
                                 Arch
                               </span>
-                            </div>
-                          ))}
+                            )}
+                          </div>
                         </div>
 
                         <div
@@ -1380,16 +1404,6 @@ export const YardOverview: React.FC<YardOverviewProps> = ({
                         }}
                         className="w-full h-full grid soil-pattern border-4 border-amber-800 rounded-xl p-1 gap-0.5 relative overflow-hidden"
                       >
-                        {isTomatoArch && (
-                          <div className="absolute inset-0 pointer-events-none z-15 flex flex-col justify-around py-1">
-                            {Array.from({ length: bed.height }).map((_, rIdx) => (
-                              <div
-                                key={rIdx}
-                                className="w-full h-2 border-y border-cyan-300/80 bg-cyan-400/20"
-                              />
-                            ))}
-                          </div>
-                        )}
                         {Array.from({ length: bed.height }).map((_, rowIdx) =>
                           Array.from({ length: bed.width }).map((__, colIdx) =>
                             renderMiniBedCell(bed, colIdx, rowIdx, stats)

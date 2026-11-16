@@ -4,9 +4,9 @@ import { YardOverview } from './components/YardOverview';
 import { BedEditor } from './components/BedEditor';
 import { PlantGuidePage } from './components/PlantGuidePage';
 import {
+  BedConfig,
   BedIrrigationType,
   GardenBed,
-  GardenBedType,
   GardenLayout,
   SurfaceStyleId,
   UserProfile,
@@ -23,12 +23,69 @@ import {
   signOutUser,
   subscribeToAuth,
 } from './services/firebase';
-import { PLANT_MAP } from './data/plants';
 import {
   doesCellHaveCage,
   doesCellHaveDrip,
+  getSquareDivision,
+  getSquareRepresentativePlant,
   isCellUnderArch,
+  makeSlotKey,
+  parsePlantingKey,
 } from './utils/companionChecker';
+
+/**
+ * Changes the N×N planting grid of one square, carrying existing plants across:
+ * - whole → split: every new slot gets the whole-square plant
+ * - split → split: slots are remapped proportionally
+ * - split → whole: the most common plant in the square is kept
+ */
+function applySquareDivision(bed: GardenBed, coords: string[], n: number): GardenBed {
+  const cells = { ...bed.cells };
+  const subdivisions = { ...(bed.subdivisions || {}) };
+  const subCells = { ...(bed.subCells || {}) };
+  const working: GardenBed = { ...bed, cells, subdivisions, subCells };
+
+  for (const coord of coords) {
+    const cur = getSquareDivision(working, coord);
+    if (cur === n) continue;
+    const [c, r] = coord.split(',').map(Number);
+
+    // Snapshot current slot contents and remove them
+    const oldSlots: Record<string, string> = {};
+    if (cur > 1) {
+      for (let sy = 0; sy < cur; sy++) {
+        for (let sx = 0; sx < cur; sx++) {
+          const k = makeSlotKey(c, r, sx, sy);
+          if (subCells[k]) oldSlots[`${sx},${sy}`] = subCells[k];
+          delete subCells[k];
+        }
+      }
+    }
+    const wholePlant = cur === 1 ? cells[coord] : undefined;
+
+    if (n <= 1) {
+      delete subdivisions[coord];
+      const counts: Record<string, number> = {};
+      for (const pid of Object.values(oldSlots)) counts[pid] = (counts[pid] || 0) + 1;
+      const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+      if (top) cells[coord] = top[0];
+    } else {
+      subdivisions[coord] = n;
+      delete cells[coord];
+      for (let sy = 0; sy < n; sy++) {
+        for (let sx = 0; sx < n; sx++) {
+          const pid =
+            cur === 1
+              ? wholePlant
+              : oldSlots[`${Math.floor((sx * cur) / n)},${Math.floor((sy * cur) / n)}`];
+          if (pid) subCells[makeSlotKey(c, r, sx, sy)] = pid;
+        }
+      }
+    }
+  }
+
+  return working;
+}
 
 export function App() {
   const [layouts, setLayouts] = useState<GardenLayout[]>(() => loadLocalLayouts());
@@ -134,6 +191,8 @@ export function App() {
         ...b,
         id: `bed-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         cells: { ...b.cells },
+        subdivisions: b.subdivisions ? { ...b.subdivisions } : undefined,
+        subCells: b.subCells ? { ...b.subCells } : undefined,
         cagedCells: b.cagedCells ? { ...b.cagedCells } : undefined,
         archCells: b.archCells ? { ...b.archCells } : undefined,
       })),
@@ -181,21 +240,18 @@ export function App() {
     persistUpdatedLayout(updated);
   };
 
-  const handleCreateBed = (
-    name: string,
-    width: number,
-    height: number,
-    bedType: GardenBedType = 'standard',
-    walkwayWidth: number = 2
-  ) => {
+  const handleCreateBed = (config: BedConfig) => {
     const offsetIndex = currentLayout.beds.length;
     const newBed: GardenBed = {
       id: `bed-${Date.now()}`,
-      name,
-      bedType,
-      walkwayWidth,
-      width,
-      height,
+      name: config.name,
+      bedType: config.bedType,
+      walkwayWidth: config.walkwayWidth,
+      width: config.width,
+      height: config.height,
+      ...(config.bedType === 'arch_box'
+        ? { archStart: config.archStart ?? 0, archLength: config.archLength ?? config.height }
+        : {}),
       x: 2 + (offsetIndex * 3) % 10,
       y: 2 + Math.floor(offsetIndex / 2) * 5,
       cells: {},
@@ -232,6 +288,8 @@ export function App() {
       x: orig.x + 2,
       y: orig.y + 2,
       cells: { ...orig.cells },
+      subdivisions: orig.subdivisions ? { ...orig.subdivisions } : undefined,
+      subCells: orig.subCells ? { ...orig.subCells } : undefined,
       cagedCells: orig.cagedCells ? { ...orig.cagedCells } : undefined,
       archCells: orig.archCells ? { ...orig.archCells } : undefined,
     };
@@ -351,6 +409,16 @@ export function App() {
       updatedAt: Date.now(),
       beds: currentLayout.beds.map((b) => {
         if (b.id !== bedId) return b;
+        if (parsePlantingKey(coord).isSlot) {
+          // Sub-slot inside a split square
+          const nextSub = { ...(b.subCells || {}) };
+          if (plantId === null) {
+            delete nextSub[coord];
+          } else {
+            nextSub[coord] = plantId;
+          }
+          return { ...b, subCells: nextSub };
+        }
         const nextCells = { ...b.cells };
         const nextCaged = { ...(b.cagedCells || {}) };
         if (plantId === null) {
@@ -367,14 +435,31 @@ export function App() {
     persistUpdatedLayout(updated);
   };
 
+  /** Sets the N×N planting grid for one square, or for every square when coord === 'all' */
+  const handleSetSquareDivision = (bedId: string, coord: string | 'all', n: number) => {
+    const updated: GardenLayout = {
+      ...currentLayout,
+      updatedAt: Date.now(),
+      beds: currentLayout.beds.map((b) => {
+        if (b.id !== bedId) return b;
+        if (coord !== 'all') return applySquareDivision(b, [coord], n);
+        const all: string[] = [];
+        for (let r = 0; r < b.height; r++) {
+          for (let c = 0; c < b.width; c++) all.push(`${c},${r}`);
+        }
+        return applySquareDivision(b, all, n);
+      }),
+    };
+    persistUpdatedLayout(updated);
+  };
+
   const handleToggleCage = (bedId: string, coord: string) => {
     const updated: GardenLayout = {
       ...currentLayout,
       updatedAt: Date.now(),
       beds: currentLayout.beds.map((b) => {
         if (b.id !== bedId) return b;
-        const plantId = b.cells[coord];
-        const plant = plantId ? PLANT_MAP[plantId] : null;
+        const plant = getSquareRepresentativePlant(b, coord);
         const currentlyHasCage = doesCellHaveCage(b, coord, plant);
         return {
           ...b,
@@ -446,20 +531,20 @@ export function App() {
       ...currentLayout,
       updatedAt: Date.now(),
       beds: currentLayout.beds.map((b) =>
-        b.id === bedId ? { ...b, cells: {}, cagedCells: {}, archCells: {} } : b
+        b.id === bedId
+          ? { ...b, cells: {}, subCells: {}, subdivisions: {}, cagedCells: {}, archCells: {} }
+          : b
       ),
     };
     persistUpdatedLayout(updated);
   };
 
-  const handleResizeOrRenameBed = (
-    bedId: string,
-    name: string,
-    width: number,
-    height: number,
-    bedType: GardenBedType,
-    walkwayWidth: number
-  ) => {
+  const handleResizeOrRenameBed = (bedId: string, config: BedConfig) => {
+    const { name, width, height, bedType, walkwayWidth, archStart, archLength } = config;
+    const inBounds = (coord: string) => {
+      const { col, row } = parsePlantingKey(coord);
+      return col < width && row < height;
+    };
     const updated: GardenLayout = {
       ...currentLayout,
       updatedAt: Date.now(),
@@ -467,10 +552,15 @@ export function App() {
         if (b.id !== bedId) return b;
         const trimmedCells: Record<string, string> = {};
         for (const [coord, pid] of Object.entries(b.cells)) {
-          const [c, r] = coord.split(',').map(Number);
-          if (c < width && r < height) {
-            trimmedCells[coord] = pid;
-          }
+          if (inBounds(coord)) trimmedCells[coord] = pid;
+        }
+        const trimmedSubdivisions: Record<string, number> = {};
+        for (const [coord, n] of Object.entries(b.subdivisions || {})) {
+          if (inBounds(coord)) trimmedSubdivisions[coord] = n;
+        }
+        const trimmedSubCells: Record<string, string> = {};
+        for (const [key, pid] of Object.entries(b.subCells || {})) {
+          if (inBounds(key)) trimmedSubCells[key] = pid;
         }
         return {
           ...b,
@@ -479,7 +569,11 @@ export function App() {
           height,
           bedType,
           walkwayWidth,
+          archStart: bedType === 'arch_box' ? archStart ?? 0 : b.archStart,
+          archLength: bedType === 'arch_box' ? archLength ?? height : b.archLength,
           cells: trimmedCells,
+          subdivisions: trimmedSubdivisions,
+          subCells: trimmedSubCells,
         };
       }),
     };
@@ -557,6 +651,7 @@ export function App() {
               onChangeBedIrrigation={handleChangeBedIrrigation}
               onClearBed={handleClearBed}
               onResizeOrRenameBed={handleResizeOrRenameBed}
+              onSetSquareDivision={handleSetSquareDivision}
             />
           ) : (
             <div className="p-8 text-center">
@@ -565,7 +660,13 @@ export function App() {
               </p>
               <button
                 onClick={() => {
-                  handleCreateBed('Raised Bed #1', 4, 4);
+                  handleCreateBed({
+                    name: 'Raised Bed #1',
+                    width: 4,
+                    height: 4,
+                    bedType: 'standard',
+                    walkwayWidth: 2,
+                  });
                 }}
                 className="px-4 py-2 bg-emerald-600 text-white rounded-xl font-semibold text-sm"
               >
