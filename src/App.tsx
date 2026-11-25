@@ -87,7 +87,8 @@ function applySquareDivision(bed: GardenBed, coords: string[], n: number): Garde
   return working;
 }
 
-export function App() {
+export default function App() {
+  // ... (existing state declarations from lines 90-102)
   const [layouts, setLayouts] = useState<GardenLayout[]>(() => loadLocalLayouts());
   const [currentLayoutId, setCurrentLayoutId] = useState<string>(() => {
     const initial = loadLocalLayouts();
@@ -592,7 +593,9 @@ export function App() {
 
   return (
     <div className="min-h-screen flex flex-col bg-stone-50 text-stone-900">
-      <Header
+      {/* Mobile-first container with max-width for larger screens */}
+      <div className="w-full md:max-w-[1280px] mx-auto">
+        <Header
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         layouts={layouts}
@@ -684,6 +687,7 @@ export function App() {
         )}
       </main>
     </div>
-  );
-}
-export default App;
+  </div>
+);
+};
+
